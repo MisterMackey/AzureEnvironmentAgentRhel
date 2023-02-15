@@ -1,0 +1,71 @@
+# Copyright 2023 mistermackey
+# 
+# Permission is hereby granted, free of charge, to any person obtaining a copy of this 
+# software and associated documentation files (the “Software”), to deal in the Software without 
+# restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, 
+# sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so.
+# 
+# THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT 
+# NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL 
+# THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION 
+# OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+
+# SYNOPSIS
+# this pipeline has been tested against a RHEL8.5 machine in azure. It installs the azagent under /opt/azagent (if not present already) and
+# registers the VM to the chosen environment in azure devops (for deployment groups, simply install the agent extension). I could not find
+# an example like this online that did the thing and had to piece it together with lots of trial and error.
+
+# Certain decisions in how this thing is layed out and behaves is simply the result of lots of tinkering. In the end this worked and i don't have
+# the patience to tidy it up at this point. 
+
+# guide: fill in the variables presented. also create a secret  variable for the pattoken in azure devops for the pipeline, name it PATTOKEN
+# set the azureSubscription input to the service connection for your azure environment and let er rip
+# the first job exits early if the target folder alreayd exists, the second job should print something along the lines of "agent already installed"
+# when attempted, making the thing as a whole idempotent
+
+trigger: none
+
+variables:
+  - name: vmName
+    value: 'YourVmNameHere'
+    #do not forget to set a PatToken as a secret variable in your pipeline. this shows up inthe file as $(PATTOKEN)
+  - name: resourceGroup
+    value: 'resource group name here'
+  - name: environmentName
+    value: 'environment name here'
+  - name: orgUrl
+    value: 'https://dev.azure.com/YourOrgNameHere'
+  - name: projectName
+    value: 'project name in azure devops containing the environment'
+
+stages:
+  - stage: InstallAgent
+    jobs:
+      - job: DownloadInstaller
+        displayName: 'Download the installation files'
+        steps:
+          - task: AzureCLI@2
+            inputs:
+              azureSubscription: 'Your service connection here'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              failOnStandardError: true
+              arguments: $(vmName) $(resourceGroup)
+              inlineScript: |
+                az vm run-command invoke -g $2 -n $1 --command-id RunShellScript --scripts ' \
+                if [[ -d /opt/azagent ]]; then exit 0; fi; \
+                sudo mkdir -m 777 /opt/azagent; \
+                cd /opt/azagent && curl -fkSL -o vstsagent.tar.gz https://vstsagentpackage.azureedge.net/agent/2.217.2.tar.gz && tar -zxvf vstsagent.tar.gz; '
+      - job: runInstaller
+        displayName: 'run the installer'
+        steps:
+          - task: AzureCLI@2
+            inputs:
+              azureSubscription: 'Your service connection here'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              failOnStandardError: true
+              arguments: $(PATTOKEN) $(environmentName) $(orgUrl) $(projectName) $(vmName) $(resourceGroup) 
+              inlineScript: |
+                az vm run-command invoke -g $6 -n $5 --command-id RunShellScript --parameters $1 $2 $3 $4 --scripts 'export AGENT_ALLOW_RUNASROOT="1"; cd /opt/azagent; ./config.sh --unattended --replace --environment --environmentname $2 --acceptteeeula --agent $HOSTNAME --url $3 --work _work --projectname $4 --auth PAT --token $1 --runasservice; sudo ./svc.sh install; sudo .svc.sh start;'
